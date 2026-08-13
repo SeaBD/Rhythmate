@@ -1,13 +1,31 @@
-#Step 1: load the data:
+#Step 1: load the required data:
+setwd("C:\\Users\\seabd4\\OneDrive - Université Laval\\Documents\\ULAVAL\\tcga\\GSE62944\\rhythmate")
 
 rhythmate_cancer_data <- readRDS("rhythmate_cancer_data.rds")
 rhythmate_normal_data <- readRDS("rhythmate_normal_data.rds")
 rhythmate_cancer_clinical <- readRDS("rhythmate_cancer_clinical.rds")
-rhythmate_normal_clinical <- readRDS("clinical_normal_tcga.rds")
+rhythmate_normal_clinical <- readRDS("rhythmate_normal_clinical.rds")
 rhythmate_survival_data <- read.xlsx("rhythmate_survival_data.xlsx")
 
+#the quantile normalized data
+rhythmate_cancer_qn <- readRDS("rhythmate_cancer_qn.rds")
+rhythmate_normal_qn <- readRDS("rhythmate_normal_qn.rds")
 
-#Step2: run run_rhythmate_normal_analysis in an object named "out_norm"
+
+group1 <- toupper(c("Clock","Arntl","Npas2","Nfil3","Cry1","Cry2", "Per1","Per2","Per3",
+                    "Nr1d1","Nr1d2" ,"Bhlhe40","Dbp" ,"Hlf" ,"Tef"))
+group1 <- append(group1, "C1orf51", after = which(group1 == "CRY2"))
+
+group2 <- toupper(c("Cdk1", "Ccna2", "Plk1", "Mcm2", "E2f1", "Ccnd1", "Cdk4", "Pcna", 
+                    "Rpa1", "Rb1", "Cdc6", "Cdc20", "Aurka", "Cdc25c", "Cenpe", "Ccnb1"))
+group3 <- c("MYC", "MYCN", "MKI67")
+
+
+
+#Step2: run run_rhythmate_normal_analysis in two objects named "out_norm" and "out_norm_cluster"
+#define your desired gene names
+#this function should be run twice: once with apply_log2_transform equal FALSE and once equal TRUE (base on 
+#whether you have applied log2 to your expression data). 
 
 run_rhythmate_normal_analysis <- function(
     rhythmate_normal_data,
@@ -19,7 +37,9 @@ run_rhythmate_normal_analysis <- function(
     min_number_of_samples_per_subtype = 30,
     n_samples_per_iteration           = 24,
     seed                              = 130,
-    correlation_method                = c("spearman", "pearson")
+    correlation_method                = c("spearman", "pearson"),
+    apply_log2_transform              = TRUE,
+    exclude_self_tissue               = TRUE
 ) {
   
   #dependencies
@@ -56,7 +76,7 @@ run_rhythmate_normal_analysis <- function(
   if (length(group1) < 2) warning("`group1` has < 2 genes; within-group correlations will be trivial.")
   if (length(group2) < 2) warning("`group2` has < 2 genes; within-group correlations will be trivial.")
   
-  #Optional group3
+  # Optional group3
   if (!is.null(group3)) {
     if (!is.character(group3)) stop("`group3` must be a character vector of gene symbols.")
     g3 <- intersect(group3, rownames(rhythmate_normal_data))
@@ -99,6 +119,11 @@ run_rhythmate_normal_analysis <- function(
     if (is.null(mat) || any(dim(mat) < 2)) return(numeric(0))
     mat[lower.tri(mat)]
   }
+  pairwise_distance <- function(vec_a, vec_b) {
+    if (!length(vec_a) || !length(vec_b) || length(vec_a) != length(vec_b)) return(NA_real_)
+    as.numeric(philentropy::distance(rbind(vec_a, vec_b), method = "euclidean",
+                                     use.row.names = FALSE, mute.message = TRUE))
+  }
   
   # prepare subtype barcode list 
   dplyr <- asNamespace("dplyr")
@@ -121,7 +146,7 @@ run_rhythmate_normal_analysis <- function(
   
   set.seed(seed)
   
-  #fix gene sets to what's available in the data 
+  # fix gene sets to what's available in the data 
   all_available <- intersect(rownames(rhythmate_normal_data), union(group1, group2))
   g1 <- intersect(group1, all_available)
   g2 <- intersect(group2, all_available)
@@ -129,19 +154,19 @@ run_rhythmate_normal_analysis <- function(
   if (!length(g2)) stop("None of the `group2` genes are present in `rhythmate_normal_data`.")
   union_genes <- union(union(g1, g2), g3)
   
-  #pre-compute row labels to make outputs readable
+  # pre-compute row labels to make outputs readable
   cross_row_labels <- as.vector(outer(g1, g2, function(a, b) paste0(a, "::", b)))
   cir_row_labels   <- if (length(g1) >= 2) apply(utils::combn(g1, 2), 2, paste, collapse = "::") else character(0)
   cell_row_labels  <- if (length(g2) >= 2) apply(utils::combn(g2, 2), 2, paste, collapse = "::") else character(0)
   
-  #containers
+  # containers
   exp.normal <- list()
   exp.normal.g3 <- list()
   normal     <- list()
   normal.cir <- list()
   normal.cell <- list()
   
-  #per subtype iterations
+  # per subtype iterations
   for (tyno in names(barcode_list)) {
     barcodes <- barcode_list[[tyno]]
     valid_barcodes <- intersect(barcodes, colnames(rhythmate_normal_data))
@@ -157,7 +182,11 @@ run_rhythmate_normal_analysis <- function(
         sampled_barcodes <- sample(valid_barcodes, n_samples_per_iteration, replace = FALSE)
         n.samples <- rhythmate_normal_data[, sampled_barcodes, drop = FALSE]
         
-        exp.data <- log2(1 + n.samples[union_genes, , drop = FALSE])
+        if (isTRUE(apply_log2_transform)) {
+          exp.data <- log2(1 + n.samples[union_genes, , drop = FALSE])
+        } else {
+          exp.data <- n.samples[union_genes, , drop = FALSE]
+        }
         
         g1_data <- exp.data[g1, , drop = FALSE]
         g2_data <- exp.data[g2, , drop = FALSE]
@@ -211,7 +240,7 @@ run_rhythmate_normal_analysis <- function(
     }
   }
   
-  #aggregate per subtype across iterations
+  # aggregate per subtype across iterations
   expr.normal  <- list()
   normm        <- list()
   normm.cir    <- list()
@@ -253,7 +282,7 @@ run_rhythmate_normal_analysis <- function(
     normccd.both[[tissue]] <- as.vector(normm[[tissue]])
   }
   
-  ## Build the reference profile FROM THE NORMAL SAMPLES themselves 
+  # build the reference profile FROM THE NORMAL SAMPLES themselves 
   ref.mat.mean      <- reduceApplyListOfArrays(normm)       # Group1 x Group2, averaged over ALL normal subtypes
   ref.mat.mean.cir  <- reduceApplyListOfArrays(normm.cir)   # Group1 x Group1, averaged over ALL normal subtypes
   ref.mat.mean.cell <- reduceApplyListOfArrays(normm.cell)  # Group2 x Group2, averaged over ALL normal subtypes
@@ -262,20 +291,19 @@ run_rhythmate_normal_analysis <- function(
   ref.ccd.cell.mean <- if (!is.null(ref.mat.mean.cell)) lower_tri_vector(ref.mat.mean.cell) else numeric(0)
   ref.ccd.both.mean <- if (!is.null(ref.mat.mean))      as.vector(ref.mat.mean)             else numeric(0)
   
-  #distance of every normal subtype to the normal-derived reference
+  # distance of every normal subtype to each normal reference subtype
   for (tissue in names(normal)) {
-    if (length(ref.ccd.cir.mean) > 0 && length(normccd.cir[[tissue]]) == length(ref.ccd.cir.mean)) {
-      bidis.cir <- rbind(ref.ccd.cir.mean, normccd.cir[[tissue]])
-      disn.cir[[tissue]] <- as.numeric(philentropy::distance(bidis.cir, method = "euclidean"))
+    other_tissues <- if (isTRUE(exclude_self_tissue)) {
+      setdiff(names(normccd.cir), tissue)
+    } else {
+      names(normccd.cir)
     }
-    if (length(ref.ccd.cell.mean) > 0 && length(normccd.cell[[tissue]]) == length(ref.ccd.cell.mean)) {
-      bidis.cell <- rbind(ref.ccd.cell.mean, normccd.cell[[tissue]])
-      disn.cell[[tissue]] <- as.numeric(philentropy::distance(bidis.cell, method = "euclidean"))
-    }
-    if (length(ref.ccd.both.mean) > 0 && length(normccd.both[[tissue]]) == length(ref.ccd.both.mean)) {
-      bidis.both <- rbind(ref.ccd.both.mean, normccd.both[[tissue]])
-      disn.both[[tissue]] <- as.numeric(philentropy::distance(bidis.both, method = "euclidean"))
-    }
+    disn.cir[[tissue]]  <- vapply(other_tissues,
+                                  function(ot) pairwise_distance(normccd.cir[[tissue]],  normccd.cir[[ot]]),  numeric(1))
+    disn.cell[[tissue]] <- vapply(other_tissues,
+                                  function(ot) pairwise_distance(normccd.cell[[tissue]], normccd.cell[[ot]]), numeric(1))
+    disn.both[[tissue]] <- vapply(other_tissues,
+                                  function(ot) pairwise_distance(normccd.both[[tissue]], normccd.both[[ot]]), numeric(1))
   }
   
   # build final data frames
@@ -301,7 +329,7 @@ run_rhythmate_normal_analysis <- function(
   normal_dataframe.cir  <- as_df_from_equal_length_vectors(normccd.cir,  cir_row_labels)
   normal_dataframe.cell <- as_df_from_equal_length_vectors(normccd.cell, cell_row_labels)
   
-  # Expression-by-sample long frame across all subtypes/iterations
+  # expression-by-sample long frame across all subtypes/iterations
   all_tissue_expr <- list()
   all_tissue_expr_g3 <- list()
   for (tissue in names(exp.normal)) {
@@ -338,20 +366,20 @@ run_rhythmate_normal_analysis <- function(
     if (length(all_tissue_expr_g3)) dplyr::bind_rows(all_tissue_expr_g3)
   else tibble::tibble()
   
-  #package distances as data frames (one row per subtype) 
+  # package distances as data frames (one row per subtype) 
   to_df_distance <- function(lst) {
     if (!length(lst)) return(data.frame())
-    out <- data.frame(Distance = unlist(lst, use.names = FALSE), row.names = names(lst), check.names = FALSE)
-    out$Subtype <- rownames(out)
-    out <- out[, c("Subtype", "Distance")]
-    rownames(out) <- out$Subtype
+    out <- data.frame(
+      Subtype = names(lst),
+      Distance = vapply(lst, function(v) mean(v, na.rm = TRUE), numeric(1)),
+      stringsAsFactors = FALSE)
     out
   }
   disn.cir.df  <- to_df_distance(disn.cir)
   disn.cell.df <- to_df_distance(disn.cell)
   disn.both.df <- to_df_distance(disn.both)
   
-  #  return
+  # return
   invisible(list(
     normal_dataframe      = normal_dataframe,
     normal_dataframe.cir  = normal_dataframe.cir,
@@ -370,35 +398,40 @@ run_rhythmate_normal_analysis <- function(
   ))
 }
 
-group1 <- toupper(c("Clock","Arntl","Npas2","Nfil3","Cry1","Cry2", "Per1","Per2","Per3",
-                    "Nr1d1","Nr1d2" ,"Bhlhe40","Dbp" ,"Hlf" ,"Tef"))
-group1 <- append(group1, "C1orf51", after = which(group1 == "CRY2"))
+#here we input quantile normalized data where log2 already applied
+out_norm <- run_rhythmate_normal_analysis(
+  rhythmate_normal_qn, rhythmate_normal_clinical, group1, group2, group3,
+  iterations = 20, apply_log2_transform = FALSE)
 
-group2 <- toupper(c("Cdk1", "Ccna2", "Plk1", "Mcm2", "E2f1", "Ccnd1", "Cdk4", "Pcna", 
-                    "Rpa1", "Rb1", "Cdc6", "Cdc20", "Aurka", "Cdc25c", "Cenpe", "Ccnb1"))
-group3 <- c("MYC", "MYCN", "MKI67")
+#here we input NON-normalized data where log2 has not been applied
+out_norm_cluster <- run_rhythmate_normal_analysis(
+  rhythmate_normal_data, rhythmate_normal_clinical, group1, group2, group3,
+  iterations = 20, apply_log2_transform = TRUE)
 
 
-out_norm <- run_rhythmate_normal_analysis(rhythmate_normal_data, rhythmate_normal_clinical, group1, group2, group3, iterations = 20)
-
-
-#Step3: run run_rhythmate_analysis in an object named "out_can"
+#Step3: run run_rhythmate_analysis in an object named "out_can" and "out_can_cluster"
+#this function should be run twice: once with apply_log2_transform equal FALSE and once equal TRUE (base on 
+#whether you have applied log2 to your expression data). 
 
 run_rhythmate_analysis <- function(
-    rhythmate_cancer_data,      # genes x samples; rownames = gene symbols; colnames = sample IDs
-    rhythmate_cancer_clinical,  # data.frame with: cancer.type, Subtype_Selected, sample_type_id, ID, com
-    mat.mean,                   # reference Group1 x Group2 matrix
-    ccd.cir.mean,               # reference Group1 x Group1 matrix
-    ccd.cell.mean,               # reference Group2 x Group2 matrix
-    group1,                     # circadian genes
-    group2,                     # cell-cycle genes
-    group3,                     #  will NOT be used in correlations
+    rhythmate_cancer_data,      
+    rhythmate_cancer_clinical,  
+    mat.mean,                  
+    ccd.cir.mean,               
+    ccd.cell.mean,               
+    group1,                     
+    group2,                     
+    group3,                     
     iterations = 20,
     min_number_of_samples_per_subtype = 30,
     samples_per_subtype = 24,
-    seed = 130
+    seed = 130,
+    apply_log2_transform = TRUE,
+    normal_reference_cross = NULL,
+    normal_reference_cir   = NULL,
+    normal_reference_cell  = NULL
 ) {
-  ## safety checks
+  # safety checks
   required_cols <- c("cancer.type","Subtype_Selected","com")
   optional_cols <- c("ID","sample_type_id")
   
@@ -424,7 +457,7 @@ run_rhythmate_analysis <- function(
   
   set.seed(seed)
   
-  ## gene handling 
+  # gene handling 
   g1 <- toupper(as.character(group1))
   g2 <- toupper(as.character(group2))
   g3 <- toupper(as.character(group3))  
@@ -434,7 +467,7 @@ run_rhythmate_analysis <- function(
   rn_up <- toupper(rn)
   s_types <- unique(rhythmate_cancer_clinical$cancer.type)
   
-  ## helpers
+  # helpers
   count_samples <- function(type, subtype, clin) {
     if (is.null(subtype) || is.na(subtype)) return(0L)
     tab <- table(clin$cancer.type, clin$Subtype_Selected)
@@ -469,6 +502,23 @@ run_rhythmate_analysis <- function(
     sub_clean <- gsub("[^A-Za-z0-9]+", ".", subtype)
     paste0(type, ".", sub_clean)
   }
+  ccd_to_reference <- function(obs_vec, ref_table = NULL, ref_mean_vec = NULL) {
+    if (!is.null(ref_table)) {
+      ref_mat <- as.matrix(ref_table)
+      if (nrow(ref_mat) == length(obs_vec) && ncol(ref_mat) > 0) {
+        dvals <- apply(ref_mat, 2, function(ref_vec) {
+          as.numeric(philentropy::distance(rbind(as.numeric(ref_vec), as.numeric(obs_vec)),
+                                           method = "euclidean"))
+        })
+        return(as.numeric(dvals))
+      }
+    }
+    if (!is.null(ref_mean_vec) && length(ref_mean_vec) == length(obs_vec)) {
+      return(as.numeric(philentropy::distance(rbind(as.numeric(ref_mean_vec), as.numeric(obs_vec)),
+                                            method = "euclidean")))
+    }
+    numeric(0)
+  }
   match_sample_ids <- function(clin_subset, expr_colnames) {
     common_id <- character(0)
     for (k in seq_len(nrow(clin_subset))) {
@@ -495,7 +545,7 @@ run_rhythmate_analysis <- function(
     unique(common_id)
   }
   
-  ##containers 
+  # containers 
   ls.exp.pr      <- list()
   ls.it.mat      <- list()
   ls.it.mat.cir  <- list()
@@ -509,7 +559,7 @@ run_rhythmate_analysis <- function(
   ccd_scalar_both_by_type <- list()
   
   
-  ## main loop over cancer types 
+  # main loop over cancer types 
   for (type in s_types) {
     subtypes <- rhythmate_cancer_clinical %>%
       dplyr::filter(.data$cancer.type == !!type, !is.na(.data$Subtype_Selected)) %>%
@@ -567,34 +617,31 @@ run_rhythmate_analysis <- function(
         ccd.cell[[key]]    <- cor_g2[lower.tri(cor_g2)]
         
         # BOTH OSCILLATORS (cross matrix): not symmetric, so no lower.tri
-        # every (circadian gene, cell-cycle gene) cell is a distinct value,
+        # every (circadian gene, cell cycle gene) cell is a distinct value,
         # so flatten the whole matrix.
-        if (!is.null(mat.mean) && identical(dim(cor_cross), dim(mat.mean))) {
-          both_vec_ref <- as.vector(mat.mean)
-          both_vec_obs <- as.vector(cor_cross)
-          dis.both <- rbind(both_vec_ref, both_vec_obs)
-          s_both <- as.numeric(philentropy::distance(dis.both, method = "euclidean"))
+        both_vec_obs <- as.vector(cor_cross)
+        both_vec_ref <- if (!is.null(mat.mean) && identical(dim(cor_cross), dim(mat.mean))) as.vector(mat.mean) else NULL
+        s_both <- ccd_to_reference(both_vec_obs, ref_table = normal_reference_cross, ref_mean_vec = both_vec_ref)
+        if (length(s_both) > 0) {
           if (is.null(ccd_scalar_both_by_type[[type]])) ccd_scalar_both_by_type[[type]] <- list()
-          ccd_scalar_both_by_type[[type]][[key]] <- c(ccd_scalar_both_by_type[[type]][[key]], s_both)
+          ccd_scalar_both_by_type[[type]][[key]] <- c(ccd_scalar_both_by_type[[type]][[key]], as.numeric(s_both))
         }
         
         # CIRCADIAN
-        if (!is.null(ccd.cir.mean) && length(ccd.cir[[key]]) > 0) {
-          if (length(ccd.cir.mean) == length(ccd.cir[[key]])) {
-            dis.cir <- rbind(ccd.cir.mean, ccd.cir[[key]])
-            s_cir <- as.numeric(philentropy::distance(dis.cir, method = "euclidean"))
+        if (length(ccd.cir[[key]]) > 0) {
+          s_cir <- ccd_to_reference(ccd.cir[[key]], ref_table = normal_reference_cir, ref_mean_vec = ccd.cir.mean)
+          if (length(s_cir) > 0) {
             if (is.null(ccd_scalar_cir_by_type[[type]])) ccd_scalar_cir_by_type[[type]] <- list()
-            ccd_scalar_cir_by_type[[type]][[key]] <- c(ccd_scalar_cir_by_type[[type]][[key]], s_cir)
+            ccd_scalar_cir_by_type[[type]][[key]] <- c(ccd_scalar_cir_by_type[[type]][[key]], as.numeric(s_cir))
           }
         }
         
         # CELL
-        if (!is.null(ccd.cell.mean) && length(ccd.cell[[key]]) > 0) {
-          if (length(ccd.cell.mean) == length(ccd.cell[[key]])) {
-            dis.cell <- rbind(ccd.cell.mean, ccd.cell[[key]])
-            s_cell <- as.numeric(philentropy::distance(dis.cell, method = "euclidean"))
+        if (length(ccd.cell[[key]]) > 0) {
+          s_cell <- ccd_to_reference(ccd.cell[[key]], ref_table = normal_reference_cell, ref_mean_vec = ccd.cell.mean)
+          if (length(s_cell) > 0) {
             if (is.null(ccd_scalar_cell_by_type[[type]])) ccd_scalar_cell_by_type[[type]] <- list()
-            ccd_scalar_cell_by_type[[type]][[key]] <- c(ccd_scalar_cell_by_type[[type]][[key]], s_cell)
+            ccd_scalar_cell_by_type[[type]][[key]] <- c(ccd_scalar_cell_by_type[[type]][[key]], as.numeric(s_cell))
           }
         }
         
@@ -606,7 +653,7 @@ run_rhythmate_analysis <- function(
       it.mat.cell.iter[[i]]  <- ls.cor.cell
     } # end iterations
     
-    # summarize scalar CCDs by subtype for this cancer type
+    # summarize CCD values to one mean per subtype for this cancer type
     final_cir <- NULL
     if (!is.null(ccd_scalar_cir_by_type[[type]])) {
       sub_names <- names(ccd_scalar_cir_by_type[[type]])
@@ -643,7 +690,7 @@ run_rhythmate_analysis <- function(
       }
     }
     
-    # STORE 
+    # store 
     disss.cir[[type]]  <- final_cir
     disss.cell[[type]] <- final_cell
     disss.both[[type]] <- final_both
@@ -654,7 +701,7 @@ run_rhythmate_analysis <- function(
     ls.it.mat.cell[[type]] <- it.mat.cell.iter
   } # end types loop
   
-  ## Build exp.tcga.samples 
+  # build exp.tcga.samples 
   subtype_keys <- unique(unlist(lapply(ls.exp.pr, function(iter_list) {
     unique(unlist(lapply(iter_list, names), use.names = FALSE))
   }), use.names = FALSE))
@@ -688,18 +735,18 @@ run_rhythmate_analysis <- function(
   }
   
   exp.tcga.samples <- dplyr::bind_rows(exp_long_list)
-  if (nrow(exp.tcga.samples) > 0) {
+  if (nrow(exp.tcga.samples) > 0 && isTRUE(apply_log2_transform)) {
     exp.tcga.samples$Expression <- log2(exp.tcga.samples$Expression + 1)
   }
   exp.tcga.samples$Subtype <- as.character(exp.tcga.samples$Subtype)
   
   exp.tcga.samples.group3 <- dplyr::bind_rows(exp_long_list_g3)
-  if (nrow(exp.tcga.samples.group3) > 0) {
+  if (nrow(exp.tcga.samples.group3) > 0 && isTRUE(apply_log2_transform)) {
     exp.tcga.samples.group3$Expression <- log2(exp.tcga.samples.group3$Expression + 1)
   }
   exp.tcga.samples.group3$Subtype <- as.character(exp.tcga.samples.group3$Subtype)
   
-  ## Build all.cancer / all.cancer.cir / all.cancer.cell
+  # build all.cancer / all.cancer.cir / all.cancer.cell
   mean_over_iterations <- function(ls_by_type_and_iter) {
     out <- list()
     for (type in names(ls_by_type_and_iter)) {
@@ -804,7 +851,7 @@ run_rhythmate_analysis <- function(
   if (ncol(all.cancer.cell) > 0)  colnames(all.cancer.cell) <- names(mean_cell)
   
   
-  ##return 
+  # return 
   return(invisible(list(
     disss.cir        = disss.cir,
     disss.cell       = disss.cell,
@@ -821,20 +868,29 @@ run_rhythmate_analysis <- function(
   )))
 }
 
+#here we input quantile normalized data where log2 already applied
+out_can <- run_rhythmate_analysis(
+  rhythmate_cancer_qn, rhythmate_cancer_clinical,
+  out_norm$ref.mat.mean, out_norm$ref.ccd.cir.mean, out_norm$ref.ccd.cell.mean,
+  group1, group2, group3,
+  apply_log2_transform = FALSE,
+  normal_reference_cross = out_norm$normal_dataframe,
+  normal_reference_cir = out_norm$normal_dataframe.cir,
+  normal_reference_cell = out_norm$normal_dataframe.cell)
 
-group1 <- toupper(c("Clock","Arntl","Npas2","Nfil3","Cry1","Cry2", "C1orf51","Per1","Per2","Per3",
-                    "Nr1d1","Nr1d2" ,"Bhlhe40","Dbp" ,"Hlf" ,"Tef"))
-group2 <- toupper(c("Cdk1", "Ccna2", "Plk1", "Mcm2", "E2f1", "Ccnd1", "Cdk4", "Pcna", 
-                    "Rpa1", "Rb1", "Cdc6", "Cdc20", "Aurka", "Cdc25c", "Cenpe", "Ccnb1"))
-group3 <- c("MYC", "MYCN", "MKI67")
+#here we input NON-normalized data where log2 has not been applied
+out_can_cluster <- run_rhythmate_analysis(
+  rhythmate_cancer_data, rhythmate_cancer_clinical,
+  out_norm_cluster$ref.mat.mean, out_norm_cluster$ref.ccd.cir.mean, out_norm_cluster$ref.ccd.cell.mean,
+  group1, group2, group3,
+  apply_log2_transform = TRUE,
+  normal_reference_cross = out_norm_cluster$normal_dataframe,
+  normal_reference_cir = out_norm_cluster$normal_dataframe.cir,
+  normal_reference_cell = out_norm_cluster$normal_dataframe.cell)
 
-out_can <- run_rhythmate_analysis(rhythmate_cancer_data, rhythmate_cancer_clinical,
-                                  out_norm$ref.mat.mean, out_norm$ref.ccd.cir.mean,
-                                  out_norm$ref.ccd.cell.mean, group1, group2, group3)
 
 
-
-# Step3: run the following helper functions
+# Step 4: run the following helper functions
 rhythmate_survival_analysis <- function(rhythmate_survival_data, out_can,
                                         clusters_df, cluster_order) {
   message("Running survival analysis using clinical file: ", rhythmate_survival_data)
@@ -915,9 +971,19 @@ rhythmate_survival_analysis <- function(rhythmate_survival_data, out_can,
     message(pro, "   ", paste(unique(clinical.merge[[pro]]$Subtype_Selected), collapse = ", "))
   }
   
+  sanitize_subtype <- function(type, subtype) {
+    mapply(function(ty, sub) {
+      if (is.na(ty) || is.na(sub)) return(NA_character_)
+      if (startsWith(sub, paste0(ty, "."))) return(sub)
+      sub_clean <- gsub("[^A-Za-z0-9]+", ".", sub)
+      paste0(ty, ".", sub_clean)
+    }, type, subtype, USE.NAMES = FALSE)
+  }
+  
   mer.tcga1 <- list()
   for (pro in names(clinical.merge)) {
     tbl.tcga <- clinical.merge[[pro]] %>%
+      dplyr::mutate(Subtype_Selected = sanitize_subtype(pro, Subtype_Selected)) %>%
       dplyr::select(pan.samplesID, CANCER_TYPE_ACRONYM, Subtype_Selected, Subtype,
                     dsfs, dsft, dfs, dft, oss, ost, pfs, pft, ratio, log_ratio,
                     circadian_mean, cell_cycle_mean, MYC, MYCN, MKI67)
@@ -927,18 +993,7 @@ rhythmate_survival_analysis <- function(rhythmate_survival_data, out_can,
   mer.tcga2 <- data.table::rbindlist(mer.tcga1, fill = TRUE)
   mer.tcga2 <- as.data.frame(mer.tcga2)
   
-  mer.tcga2 <- mer.tcga2 %>%
-    dplyr::mutate(
-      Subtype_Selected = dplyr::recode(
-        Subtype_Selected,
-        "GBM.Mesenchymal.like"  = "GBM.GBM_LGG.Mesenchymal-like",
-        "GBM_LGG.NA"            = "GBM.GBM_LGG.NA",
-        "GBM.Classic.like"      = "GBM.GBM_LGG.Classic-like",
-        "LGG.Mesenchymal.like"  = "LGG.GBM_LGG.Mesenchymal-like",
-        "LGG.G.CIMP.high"       = "LGG.GBM_LGG.G-CIMP-high",
-        "LGG.Codel"             = "LGG.GBM_LGG.Codel"))
-  
-  #### CLUSTER GROUPS: labeled C1 to Ck in the SAME left to right heatmap
+    #### CLUSTER GROUPS: labeled C1 to Ck in the SAME left to right heatmap
   samples_by_cluster <- split(as.character(clusters_df$Sample), clusters_df$Cluster)
   k_eff <- length(cluster_order)
   
@@ -1073,15 +1128,16 @@ rhythmate_export_cox_excel <- function(cox_models, logrank_pvals, xlsx_path) {
 }
 
 
-# Step 4: run run_rhythmate_clustering
-# there are 3 output files with rhythmates' prefix:
+# Step 5: run run_rhythmate_clustering
+# there are 3 output files with "rhythmate" as prefix:
 # 1 ––> A multipage pdf file including:
 # clustered heatmap, expression box plot, CCD plots and survival plots
 # 2 --> An excel file including COX models 
 # 3 --> An csv file inlcuding the cluster assignments
 
-run_rhythmate_clustering <- function(out_norm, out_can, k = 5, out_prefix = "rhythmate",
-                                     rhythmate_survival_data = NULL) {
+run_rhythmate_clustering <- function(out_norm, out_can, k = 5, out_prefix = "Rhythmate",
+                                     rhythmate_survival_data = NULL,
+                                     out_norm_cluster = NULL, out_can_cluster = NULL) {
   required_pkgs <- c("dplyr", "purrr", "tidyr", "tibble", "ComplexHeatmap", "tidyverse",
                      "circlize", "reshape2", "ggrepel", "survival", "survminer", "data.table",
                      "openxlsx", "broom", "TCGAbiolinks")
@@ -1094,9 +1150,11 @@ run_rhythmate_clustering <- function(out_norm, out_can, k = 5, out_prefix = "rhy
   message("Starting Rhythmate clustering with k = ", k)
   
   #### 1) PREPARE MATRIX and CLUSTERING
-  new.both <- cbind(out_norm$normal_dataframe,      out_can$all.cancer)
-  new.cir  <- cbind(out_norm$normal_dataframe.cir,  out_can$all.cancer.cir)
-  new.cell <- cbind(out_norm$normal_dataframe.cell, out_can$all.cancer.cell)
+  cluster_norm <- if (is.null(out_norm_cluster)) out_norm else out_norm_cluster
+  cluster_can  <- if (is.null(out_can_cluster))  out_can  else out_can_cluster
+  new.both <- cbind(cluster_norm$normal_dataframe,      cluster_can$all.cancer)
+  new.cir  <- cbind(cluster_norm$normal_dataframe.cir,  cluster_can$all.cancer.cir)
+  new.cell <- cbind(cluster_norm$normal_dataframe.cell, cluster_can$all.cancer.cell)
   all.three <- rbind(new.both, new.cir, new.cell)
   t.all.three <- t(all.three)
   
@@ -1113,9 +1171,9 @@ run_rhythmate_clustering <- function(out_norm, out_can, k = 5, out_prefix = "rhy
   message("Saved: ", out_csv)
   
   #### 2) SAMPLE TYPE ANNOTATION
-  n_normal <- ncol(out_norm$normal_dataframe)
+  n_normal <- ncol(cluster_norm$normal_dataframe)
   sample_types <- c(rep("Normal", n_normal),
-                    rep("Cancer", ncol(out_can$all.cancer)))
+                    rep("Cancer", ncol(cluster_can$all.cancer)))
   
   sample_anno <- HeatmapAnnotation(
     SampleType = sample_types,
@@ -1231,7 +1289,7 @@ run_rhythmate_clustering <- function(out_norm, out_can, k = 5, out_prefix = "rhy
     theme_bw() +
     theme(axis.text.x = element_text(angle=90, vjust=0.5, hjust=1)) +
     scale_color_manual(values = c("#DC3220", "#005AB5"))+
-    labs(title="Expression per Subtype", y="Expression")
+    labs(title="Expression per Subtype", y="Normalized Expression")
   
   #### 7) PAGES 3-5: CIRCADIAN / CELL-CYCLE / BOTH-OSCILLATOR CCD
   normalize_named_numeric <- function(x) {
@@ -1246,8 +1304,11 @@ run_rhythmate_clustering <- function(out_norm, out_can, k = 5, out_prefix = "rhy
     names(v_num) <- nm
     v_num
   }
-  normal_median <- function(fin_df) {
-    median(fin_df$CCD[fin_df$Type == "Normal"], na.rm = TRUE)
+  normal_mean <- function(fin_df) {
+    mean(fin_df$CCD[fin_df$Type == "Normal"], na.rm = TRUE)
+  }
+  normal_p95 <- function(fin_df) {
+    stats::quantile(fin_df$CCD[fin_df$Type == "Normal"], probs = 0.95, na.rm = TRUE, names = FALSE)
   }
   
   flatten_disss_to_df <- function(disss) {
@@ -1269,15 +1330,7 @@ run_rhythmate_clustering <- function(out_norm, out_can, k = 5, out_prefix = "rhy
     data.frame(Type = type_col, Subtype = subtype_col, CCD = ccd_col, stringsAsFactors = FALSE)
   }
   
-  build_ccd_df <- function(ccd_mean, disn, disss) {
-    ref_vals <- normalize_named_numeric(ccd_mean)
-    df_ref <- data.frame(
-      Type= "Reference",
-      Subtype = if (length(ref_vals) > 0 && !is.null(names(ref_vals)))
-        names(ref_vals) else rep("Reference", length(ref_vals)),
-      CCD= as.numeric(ref_vals),
-      stringsAsFactors = FALSE)
-    
+  build_ccd_df <- function(disn, disss) {
     disn_vec <- normalize_named_numeric(disn)
     df_norm <- data.frame(
       Type = "Normal",
@@ -1289,47 +1342,49 @@ run_rhythmate_clustering <- function(out_norm, out_can, k = 5, out_prefix = "rhy
     
     df_cancer <- flatten_disss_to_df(disss)
     
-    fin <- rbind(df_ref, df_norm, df_cancer)
+    fin <- rbind(df_norm, df_cancer)
     fin <- fin[!is.na(fin$CCD), , drop = FALSE]
     fin
   }
   
   order_types_by_median <- function(fin_df) {
     ord <- fin_df %>%
-      dplyr::filter(Type != "Reference") %>%
       dplyr::group_by(Type) %>%
       dplyr::summarise(med = median(CCD, na.rm = TRUE)) %>%
       dplyr::arrange(med) %>%
       dplyr::pull(Type)
-    fin_df$Type <- factor(fin_df$Type, levels = c("Reference", ord))
+    fin_df$Type <- factor(fin_df$Type, levels = ord)
     fin_df
   }
   
   build_cancer_colors <- function(all_types) {
-    cancers <- setdiff(all_types, "Reference")
-    cols <- grDevices::hcl.colors(length(cancers), palette = "Dark 3")
-    setNames(cols, cancers)
+    cancers <- setdiff(all_types, "Normal")
+    cols <- if (length(cancers) > 0) {
+      setNames(grDevices::hcl.colors(length(cancers), palette = "Dark 3"), cancers)
+    } else {
+      character(0)
+    }
+    c(Normal = "#006666", cols)
   }
   
   make_ccd_plot <- function(fin_df, title, col_map) {
     fin_df <- order_types_by_median(fin_df)
-    dot_types <- levels(fin_df$Type)[levels(fin_df$Type) != "Reference"]
-    norm_med <- normal_median(fin_df)
+    norm_mean <- normal_mean(fin_df)
+    norm_p95_val <- normal_p95(fin_df)
     
     ggplot(fin_df, aes(x = Type, y = CCD)) +
-      geom_hline(yintercept = norm_med, linetype = "dotted",
+      geom_hline(yintercept = norm_mean, linetype = "dotted",
                  color = "black", linewidth = 0.6) +
-      geom_boxplot(data = dplyr::filter(fin_df, Type == "Reference"),
-                   width = 0.5, outlier.shape = NA,
-                   fill = "#BFBFBF", color = "#585858") +
-      geom_point(data = dplyr::filter(fin_df, Type %in% dot_types),
+      geom_hline(yintercept = norm_p95_val, linetype = "dotted",
+                 color = "#555555", linewidth = 0.6) +
+      geom_point(data = fin_df,
                  aes(color = Type),
                  position = position_jitter(width = 0.18, height = 0),
                  size = 2) +
-      ggrepel::geom_text_repel(data = dplyr::filter(fin_df, Type %in% dot_types),
-                               aes(label = Subtype, color = Type),
-                               size = 2,
-                               max.overlaps = 50,
+      ggrepel::geom_text_repel(data = fin_df,
+                              aes(label = Subtype, color = Type),
+                              size = 2,
+                              max.overlaps = 50,
                                position = position_jitter(width = 0.18, height = 0)) +
       scale_color_manual(values = col_map, drop = FALSE) +
       theme_minimal(base_size = 16) +
@@ -1339,38 +1394,30 @@ run_rhythmate_clustering <- function(out_norm, out_can, k = 5, out_prefix = "rhy
   }
   
   add_cluster_info <- function(fin_df, clusters_df, cluster_order) {
-    ref_rows   <- dplyr::filter(fin_df, Type == "Reference")
-    other_rows <- dplyr::filter(fin_df, Type != "Reference")
-    
-    ref_expanded <- tidyr::crossing(
-      Cluster = factor(cluster_order, levels = cluster_order),
-      ref_rows[, c("Type", "Subtype", "CCD")])
-    
-    merged_other <- dplyr::left_join(other_rows, clusters_df, by = c("Subtype" = "Sample"))
-    n_dropped <- sum(is.na(merged_other$Cluster))
+    merged <- dplyr::left_join(fin_df, clusters_df, by = c("Subtype" = "Sample"))
+    n_dropped <- sum(is.na(merged$Cluster))
     if (n_dropped > 0) {
-      warning(n_dropped, " non-reference rows had no matching Sample in clusters_df and will be dropped")
+      warning(n_dropped, " rows had no matching Sample in clusters_df and will be dropped")
     }
-    merged_other <- merged_other[!is.na(merged_other$Cluster), , drop = FALSE]
-    merged_other$Cluster <- factor(merged_other$Cluster, levels = cluster_order)
-    
-    dplyr::bind_rows(ref_expanded, merged_other)
+    merged <- merged[!is.na(merged$Cluster), , drop = FALSE]
+    merged$Cluster <- factor(merged$Cluster, levels = cluster_order)
+    merged
   }
   
-  make_ccd_plot_cluster <- function(fin_df, title, col_map, norm_med) {
-    dot_types <- unique(fin_df$Type[fin_df$Type != "Reference"])
-    
+  make_ccd_plot_cluster <- function(fin_df, title, col_map, norm_mean, norm_p95_val) {
     ggplot(fin_df, aes(x = Cluster, y = CCD)) +
-      geom_hline(yintercept = norm_med, linetype = "dotted",
+      geom_hline(yintercept = norm_mean, linetype = "dotted",
                  color = "black", linewidth = 0.6) +
-      geom_point(data = dplyr::filter(fin_df, Type %in% dot_types),
+      geom_hline(yintercept = norm_p95_val, linetype = "dotted",
+                 color = "#555555", linewidth = 0.6) +
+      geom_point(data = fin_df,
                  aes(color = Type),
                  position = position_jitter(width = 0.18, height = 0, seed = 42),
                  size = 2) +
-      ggrepel::geom_text_repel(data = dplyr::filter(fin_df, Type %in% dot_types),
-                               aes(label = Subtype, color = Type),
-                               size = 2, max.overlaps = 50,
-                               position = position_jitter(width = 0.18, height = 0, seed = 42)) +
+      ggrepel::geom_text_repel(data = fin_df,
+                              aes(label = Subtype, color = Type),
+                              size = 2, max.overlaps = 50,
+                              position = position_jitter(width = 0.18, height = 0, seed = 42)) +
       scale_color_manual(values = col_map, drop = FALSE) +
       theme_minimal(base_size = 16) +
       labs(x = " ", y = "CCD", title = title) +
@@ -1378,10 +1425,10 @@ run_rhythmate_clustering <- function(out_norm, out_can, k = 5, out_prefix = "rhy
             legend.position = "none")
   }
   
-  # reference comes from out_norm (normal samples)
-  fin_cir  <- build_ccd_df(out_norm$ref.ccd.cir.mean,  out_norm$disn.cir,  out_can$disss.cir)
-  fin_cell <- build_ccd_df(out_norm$ref.ccd.cell.mean, out_norm$disn.cell, out_can$disss.cell)
-  fin_both <- build_ccd_df(out_norm$ref.ccd.both.mean, out_norm$disn.both, out_can$disss.both)
+  # reference comes from out_norm_cluster (non-normalized samples)
+  fin_cir  <- build_ccd_df(out_norm_cluster$disn.cir,  out_can_cluster$disss.cir)
+  fin_cell <- build_ccd_df(out_norm_cluster$disn.cell, out_can_cluster$disss.cell)
+  fin_both <- build_ccd_df(out_norm_cluster$disn.both, out_can_cluster$disss.both)
   
   all_types_union <- Reduce(union, list(unique(fin_cir$Type), unique(fin_cell$Type), unique(fin_both$Type)))
   col_map <- build_cancer_colors(all_types_union)
@@ -1394,9 +1441,9 @@ run_rhythmate_clustering <- function(out_norm, out_can, k = 5, out_prefix = "rhy
   fin_cell_clust <- add_cluster_info(fin_cell, clusters_df, cluster_order)
   fin_both_clust <- add_cluster_info(fin_both, clusters_df, cluster_order)
   
-  p_cir_cluster  <- make_ccd_plot_cluster(fin_cir_clust,  "Circadian CCD by Cluster", col_map, normal_median(fin_cir))
-  p_cell_cluster <- make_ccd_plot_cluster(fin_cell_clust, "Cell-Cycle CCD by Cluster", col_map, normal_median(fin_cell))
-  p_both_cluster <- make_ccd_plot_cluster(fin_both_clust, "Both-Oscillator CCD by Cluster", col_map, normal_median(fin_both))
+  p_cir_cluster  <- make_ccd_plot_cluster(fin_cir_clust,  "Circadian CCD by Cluster", col_map, normal_mean(fin_cir), normal_p95(fin_cir))
+  p_cell_cluster <- make_ccd_plot_cluster(fin_cell_clust, "Cell-Cycle CCD by Cluster", col_map, normal_mean(fin_cell), normal_p95(fin_cell))
+  p_both_cluster <- make_ccd_plot_cluster(fin_both_clust, "Both-Oscillator CCD by Cluster", col_map, normal_mean(fin_both), normal_p95(fin_both))
   
   #### 9) SURVIVAL ANALYSIS (only runs if a clinical csv path was given)
   survival_out <- NULL
@@ -1449,8 +1496,8 @@ run_rhythmate_clustering <- function(out_norm, out_can, k = 5, out_prefix = "rhy
   ))
 }
 
-run_rhythmate_clustering(out_norm, out_can, rhythmate_survival_data = "rhythmate_survival_data.xlsx")
-
-
-
-
+run_rhythmate_clustering(
+  out_norm, out_can,
+  rhythmate_survival_data = "rhythmate_survival_data.xlsx",
+  out_norm_cluster = out_norm_cluster,
+  out_can_cluster = out_can_cluster)
