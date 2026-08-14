@@ -278,7 +278,6 @@ run_rhythmate_normal_analysis <- function(
     
     normccd.cir[[tissue]]  <- lower_tri_vector(normm.cir[[tissue]])
     normccd.cell[[tissue]] <- lower_tri_vector(normm.cell[[tissue]])
-    
     normccd.both[[tissue]] <- as.vector(normm[[tissue]])
   }
   
@@ -298,12 +297,15 @@ run_rhythmate_normal_analysis <- function(
     } else {
       names(normccd.cir)
     }
+    
     disn.cir[[tissue]]  <- vapply(other_tissues,
-                                  function(ot) pairwise_distance(normccd.cir[[tissue]],  normccd.cir[[ot]]),  numeric(1))
+                                  function(ot) mean(sign(normccd.cir[[ot]])*(normccd.cir[[tissue]]-normccd.cir[[ot]])), numeric(1))
     disn.cell[[tissue]] <- vapply(other_tissues,
-                                  function(ot) pairwise_distance(normccd.cell[[tissue]], normccd.cell[[ot]]), numeric(1))
+                                  function(ot) mean(sign(normccd.cell[[ot]])*(normccd.cell[[tissue]]-normccd.cell[[ot]])), numeric(1))
     disn.both[[tissue]] <- vapply(other_tissues,
-                                  function(ot) pairwise_distance(normccd.both[[tissue]], normccd.both[[ot]]), numeric(1))
+                                  function(ot) mean(sign(normccd.both[[ot]])*(normccd.both[[tissue]]-normccd.both[[ot]])), numeric(1))
+    
+    
   }
   
   # build final data frames
@@ -409,6 +411,7 @@ out_norm_cluster <- run_rhythmate_normal_analysis(
   iterations = 20, apply_log2_transform = TRUE)
 
 
+
 #Step3: run run_rhythmate_analysis in an object named "out_can" and "out_can_cluster"
 #this function should be run twice: once with apply_log2_transform equal FALSE and once equal TRUE (base on 
 #whether you have applied log2 to your expression data). 
@@ -507,18 +510,19 @@ run_rhythmate_analysis <- function(
       ref_mat <- as.matrix(ref_table)
       if (nrow(ref_mat) == length(obs_vec) && ncol(ref_mat) > 0) {
         dvals <- apply(ref_mat, 2, function(ref_vec) {
-          as.numeric(philentropy::distance(rbind(as.numeric(ref_vec), as.numeric(obs_vec)),
-                                           method = "euclidean"))
+          as.numeric(mean(sign(ref_vec)*(obs_vec-ref_vec)))
         })
         return(as.numeric(dvals))
       }
     }
     if (!is.null(ref_mean_vec) && length(ref_mean_vec) == length(obs_vec)) {
       return(as.numeric(philentropy::distance(rbind(as.numeric(ref_mean_vec), as.numeric(obs_vec)),
-                                            method = "euclidean")))
+                                              method = "euclidean")))
     }
     numeric(0)
   }
+  
+  
   match_sample_ids <- function(clin_subset, expr_colnames) {
     common_id <- character(0)
     for (k in seq_len(nrow(clin_subset))) {
@@ -878,7 +882,6 @@ out_can <- run_rhythmate_analysis(
   normal_reference_cir = out_norm$normal_dataframe.cir,
   normal_reference_cell = out_norm$normal_dataframe.cell)
 
-#here we input NON-normalized data where log2 has not been applied
 out_can_cluster <- run_rhythmate_analysis(
   rhythmate_cancer_data, rhythmate_cancer_clinical,
   out_norm_cluster$ref.mat.mean, out_norm_cluster$ref.ccd.cir.mean, out_norm_cluster$ref.ccd.cell.mean,
@@ -993,7 +996,7 @@ rhythmate_survival_analysis <- function(rhythmate_survival_data, out_can,
   mer.tcga2 <- data.table::rbindlist(mer.tcga1, fill = TRUE)
   mer.tcga2 <- as.data.frame(mer.tcga2)
   
-    #### CLUSTER GROUPS: labeled C1 to Ck in the SAME left to right heatmap
+  #### CLUSTER GROUPS: labeled C1 to Ck in the SAME left to right heatmap
   samples_by_cluster <- split(as.character(clusters_df$Sample), clusters_df$Cluster)
   k_eff <- length(cluster_order)
   
@@ -1310,6 +1313,9 @@ run_rhythmate_clustering <- function(out_norm, out_can, k = 5, out_prefix = "Rhy
   normal_p95 <- function(fin_df) {
     stats::quantile(fin_df$CCD[fin_df$Type == "Normal"], probs = 0.95, na.rm = TRUE, names = FALSE)
   }
+  normal_p05 <- function(fin_df) {
+    stats::quantile(fin_df$CCD[fin_df$Type == "Normal"], probs = 0.05, na.rm = TRUE, names = FALSE)
+  }
   
   flatten_disss_to_df <- function(disss) {
     if (is.null(disss) || length(disss) == 0) {
@@ -1371,20 +1377,21 @@ run_rhythmate_clustering <- function(out_norm, out_can, k = 5, out_prefix = "Rhy
     fin_df <- order_types_by_median(fin_df)
     norm_mean <- normal_mean(fin_df)
     norm_p95_val <- normal_p95(fin_df)
+    norm_p05_val <- normal_p05(fin_df)
     
     ggplot(fin_df, aes(x = Type, y = CCD)) +
       geom_hline(yintercept = norm_mean, linetype = "dotted",
                  color = "black", linewidth = 0.6) +
-      geom_hline(yintercept = norm_p95_val, linetype = "dotted",
+      geom_hline(yintercept = c(norm_p95_val, norm_p05_val), linetype = "dotted",
                  color = "#555555", linewidth = 0.6) +
       geom_point(data = fin_df,
                  aes(color = Type),
                  position = position_jitter(width = 0.18, height = 0),
                  size = 2) +
       ggrepel::geom_text_repel(data = fin_df,
-                              aes(label = Subtype, color = Type),
-                              size = 2,
-                              max.overlaps = 50,
+                               aes(label = Subtype, color = Type),
+                               size = 2,
+                               max.overlaps = 50,
                                position = position_jitter(width = 0.18, height = 0)) +
       scale_color_manual(values = col_map, drop = FALSE) +
       theme_minimal(base_size = 16) +
@@ -1404,20 +1411,20 @@ run_rhythmate_clustering <- function(out_norm, out_can, k = 5, out_prefix = "Rhy
     merged
   }
   
-  make_ccd_plot_cluster <- function(fin_df, title, col_map, norm_mean, norm_p95_val) {
+  make_ccd_plot_cluster <- function(fin_df, title, col_map, norm_mean, norm_p95_val, norm_p05_val) {
     ggplot(fin_df, aes(x = Cluster, y = CCD)) +
       geom_hline(yintercept = norm_mean, linetype = "dotted",
                  color = "black", linewidth = 0.6) +
-      geom_hline(yintercept = norm_p95_val, linetype = "dotted",
+      geom_hline(yintercept = c(norm_p95_val, norm_p05_val), linetype = "dotted",
                  color = "#555555", linewidth = 0.6) +
       geom_point(data = fin_df,
                  aes(color = Type),
                  position = position_jitter(width = 0.18, height = 0, seed = 42),
                  size = 2) +
       ggrepel::geom_text_repel(data = fin_df,
-                              aes(label = Subtype, color = Type),
-                              size = 2, max.overlaps = 50,
-                              position = position_jitter(width = 0.18, height = 0, seed = 42)) +
+                               aes(label = Subtype, color = Type),
+                               size = 2, max.overlaps = 50,
+                               position = position_jitter(width = 0.18, height = 0, seed = 42)) +
       scale_color_manual(values = col_map, drop = FALSE) +
       theme_minimal(base_size = 16) +
       labs(x = " ", y = "CCD", title = title) +
@@ -1441,9 +1448,9 @@ run_rhythmate_clustering <- function(out_norm, out_can, k = 5, out_prefix = "Rhy
   fin_cell_clust <- add_cluster_info(fin_cell, clusters_df, cluster_order)
   fin_both_clust <- add_cluster_info(fin_both, clusters_df, cluster_order)
   
-  p_cir_cluster  <- make_ccd_plot_cluster(fin_cir_clust,  "Circadian CCD by Cluster", col_map, normal_mean(fin_cir), normal_p95(fin_cir))
-  p_cell_cluster <- make_ccd_plot_cluster(fin_cell_clust, "Cell-Cycle CCD by Cluster", col_map, normal_mean(fin_cell), normal_p95(fin_cell))
-  p_both_cluster <- make_ccd_plot_cluster(fin_both_clust, "Both-Oscillator CCD by Cluster", col_map, normal_mean(fin_both), normal_p95(fin_both))
+  p_cir_cluster  <- make_ccd_plot_cluster(fin_cir_clust,  "Circadian CCD by Cluster", col_map, normal_mean(fin_cir), normal_p95(fin_cir), normal_p05(fin_cir))
+  p_cell_cluster <- make_ccd_plot_cluster(fin_cell_clust, "Cell-Cycle CCD by Cluster", col_map, normal_mean(fin_cell), normal_p95(fin_cell), normal_p05(fin_cell))
+  p_both_cluster <- make_ccd_plot_cluster(fin_both_clust, "Both-Oscillator CCD by Cluster", col_map, normal_mean(fin_both), normal_p95(fin_both), normal_p05(fin_both))
   
   #### 9) SURVIVAL ANALYSIS (only runs if a clinical csv path was given)
   survival_out <- NULL
