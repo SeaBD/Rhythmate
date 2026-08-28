@@ -16,8 +16,9 @@ group1 <- toupper(c("Clock","Arntl","Npas2","Nfil3","Cry1","Cry2", "Per1","Per2"
                     "Nr1d1","Nr1d2" ,"Bhlhe40","Dbp" ,"Hlf" ,"Tef"))
 group1 <- append(group1, "C1orf51", after = which(group1 == "CRY2"))
 
-group2 <- toupper(c("Cdk1", "Ccna2", "Plk1", "Mcm2", "E2f1", "Ccnd1", "Cdk4", "Pcna", 
-                    "Rpa1", "Rb1", "Cdc6", "Cdc20", "Aurka", "Cdc25c", "Cenpe", "Ccnb1"))
+group2 <- toupper(c("Rb1","Cdk4","E2f1","Pcna","Cdk1", "Ccna2","Cdc25c","Cenpe",
+                    "Aurka", "Ccnb1", "Cdc20", "Rpa1", "Plk1", "Mcm2","Cdc6","Ccnd1" ))
+
 group3 <- c("MYC", "MYCN", "MKI67")
 
 
@@ -299,11 +300,11 @@ run_rhythmate_normal_analysis <- function(
     }
     
     disn.cir[[tissue]]  <- vapply(other_tissues,
-                                  function(ot) mean(sign(normccd.cir[[ot]])*(normccd.cir[[tissue]]-normccd.cir[[ot]])), numeric(1))
+                                  function(ot) pairwise_distance(normccd.cir[[tissue]],  normccd.cir[[ot]]),  numeric(1))
     disn.cell[[tissue]] <- vapply(other_tissues,
-                                  function(ot) mean(sign(normccd.cell[[ot]])*(normccd.cell[[tissue]]-normccd.cell[[ot]])), numeric(1))
+                                  function(ot) pairwise_distance(normccd.cell[[tissue]], normccd.cell[[ot]]), numeric(1))
     disn.both[[tissue]] <- vapply(other_tissues,
-                                  function(ot) mean(sign(normccd.both[[ot]])*(normccd.both[[tissue]]-normccd.both[[ot]])), numeric(1))
+                                  function(ot) pairwise_distance(normccd.both[[tissue]], normccd.both[[ot]]), numeric(1))
     
     
   }
@@ -383,6 +384,9 @@ run_rhythmate_normal_analysis <- function(
   
   # return
   invisible(list(
+    cor_matrix = normm,
+    cor_matrix_cir = normm.cir,
+    cor_matrix_cell = normm.cell,
     normal_dataframe      = normal_dataframe,
     normal_dataframe.cir  = normal_dataframe.cir,
     normal_dataframe.cell = normal_dataframe.cell,
@@ -510,7 +514,8 @@ run_rhythmate_analysis <- function(
       ref_mat <- as.matrix(ref_table)
       if (nrow(ref_mat) == length(obs_vec) && ncol(ref_mat) > 0) {
         dvals <- apply(ref_mat, 2, function(ref_vec) {
-          as.numeric(mean(sign(ref_vec)*(obs_vec-ref_vec)))
+          as.numeric(philentropy::distance(rbind(as.numeric(ref_vec), as.numeric(obs_vec)),
+                                           method = "euclidean"))
         })
         return(as.numeric(dvals))
       }
@@ -860,10 +865,9 @@ run_rhythmate_analysis <- function(
     disss.cir        = disss.cir,
     disss.cell       = disss.cell,
     disss.both       = disss.both,
-    ls.exp.pr        = ls.exp.pr,
-    ls.it.mat        = ls.it.mat,
-    ls.it.mat.cir    = ls.it.mat.cir,
-    ls.it.mat.cell   = ls.it.mat.cell,
+    cor_matrix = mean_cross,
+    cor_matrix_cir = mean_cir,
+    cor_matrix_cell = mean_cell,
     exp.tcga.samples = exp.tcga.samples,
     exp.tcga.samples.group3 = exp.tcga.samples.group3,
     all.cancer       = all.cancer,
@@ -882,6 +886,7 @@ out_can <- run_rhythmate_analysis(
   normal_reference_cir = out_norm$normal_dataframe.cir,
   normal_reference_cell = out_norm$normal_dataframe.cell)
 
+#here we input NON-normalized data where log2 has not been applied
 out_can_cluster <- run_rhythmate_analysis(
   rhythmate_cancer_data, rhythmate_cancer_clinical,
   out_norm_cluster$ref.mat.mean, out_norm_cluster$ref.ccd.cir.mean, out_norm_cluster$ref.ccd.cell.mean,
@@ -1187,8 +1192,7 @@ run_rhythmate_clustering <- function(out_norm, out_can, k = 5, out_prefix = "Rhy
   #### 3) EXTRACT HEATMAP ORDER
   n_both <- nrow(new.both); n_cir <- nrow(new.cir); n_cell <- nrow(new.cell)
   rowsplit <- c(
-    rep("1.Both Oscillators", n_both),
-    rep("2.Circadian Clock",  n_cir),
+    rep("1.Both Oscillators", n_both),    rep("2.Circadian Clock",  n_cir),
     rep("3.Cell Cycle",       n_cell))
   
   ht_temp <- Heatmap(
@@ -1222,7 +1226,7 @@ run_rhythmate_clustering <- function(out_norm, out_can, k = 5, out_prefix = "Rhy
     pivot_wider(names_from = Type, values_from = MeanExpression)
   
   ratio_per_sample_tcga <- wide_expr_sample_tcga %>%
-    filter(!is.na(CellCycle), !is.na(Circadian), Circadian != 0) %>%
+    dplyr::filter(!is.na(CellCycle), !is.na(Circadian), Circadian != 0) %>%
     mutate(Ratio = CellCycle / Circadian, Log2Ratio = log2(Ratio))
   
   mean_expr_by_sample_normal <- out_norm$exp.normal.samples %>%
@@ -1233,14 +1237,14 @@ run_rhythmate_clustering <- function(out_norm, out_can, k = 5, out_prefix = "Rhy
     pivot_wider(names_from = Type, values_from = MeanExpression)
   
   ratio_per_sample_normal <- wide_expr_sample_normal %>%
-    filter(!is.na(CellCycle), !is.na(Circadian), Circadian != 0) %>%
+    dplyr::filter(!is.na(CellCycle), !is.na(Circadian), Circadian != 0) %>%
     mutate(Ratio = CellCycle / Circadian, Log2Ratio = log2(Ratio))
   
   ratio_exp_per_sample_both_normal <- rbind(ratio_per_sample_tcga, ratio_per_sample_normal)
   
   overall_means <- sapply(ordered_cluster_subtypes, function(subs) {
     ratio_exp_per_sample_both_normal %>%
-      filter(Subtype %in% subs) %>%
+      dplyr::filter(Subtype %in% subs) %>%
       summarise(mean_log2_ratio = mean(Log2Ratio, na.rm = TRUE)) %>%
       pull(mean_log2_ratio)
   })
@@ -1428,7 +1432,7 @@ run_rhythmate_clustering <- function(out_norm, out_can, k = 5, out_prefix = "Rhy
       scale_color_manual(values = col_map, drop = FALSE) +
       theme_minimal(base_size = 16) +
       labs(x = " ", y = "CCD", title = title) +
-      theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1),
+      theme(axis.text.x = element_blank(),
             legend.position = "none")
   }
   
